@@ -12,6 +12,14 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from collections import defaultdict
 import scipy.ndimage as ndimage
+import warnings
+import logging
+
+# Suppress rasterio/GDAL warnings about blob storage
+warnings.filterwarnings('ignore', message='.*GET Request.*')
+warnings.filterwarnings('ignore', message='.*ignoring read failure.*')
+logging.getLogger('rasterio').setLevel(logging.ERROR)
+logging.getLogger('rasterio._io').setLevel(logging.ERROR)
 
 def process_sentinel1_water_extent_complete(
     geometry: shapely.geometry.Polygon,
@@ -111,7 +119,7 @@ def process_sentinel1_water_extent_complete(
         
         # Search for Sentinel-1 scenes
         search = client.search(
-            collections=["sentinel-1-rtc"],
+            collections=["sentinel-1-rtc"],  # Radiometrically terrain corrected data
             intersects=geometry,
             datetime=datetime_range,
             query=query_params,
@@ -130,7 +138,7 @@ def process_sentinel1_water_extent_complete(
         if verbose:
             print(f"Found {len(items)} Sentinel-1 scenes")
         
-        # Extract and print metadata information
+        # Extract and print metadata information about platform and orbit
         if verbose:
             print("\nMetadata Information:")
             print("---------------------")
@@ -150,13 +158,14 @@ def process_sentinel1_water_extent_complete(
             fail_on_error=False,
         )
         
-        # Store metadata for each time step
+        # Store metadata for each time step in the dataset attributes
         metadata_list = []
         for item in items:
             metadata = {
                 "platform": item.properties.get("platform", "Unknown"),
                 "orbit_state": item.properties.get("sat:orbit_state", "Unknown"),
                 "datetime": item.properties.get("datetime", "Unknown"),
+                # Add additional metadata fields as needed
                 "orbit_number": item.properties.get("sat:absolute_orbit", "Unknown"),
                 "relative_orbit": item.properties.get("sat:relative_orbit", "Unknown"),
                 "instrument_mode": item.properties.get("sar:instrument_mode", "Unknown"),
@@ -364,10 +373,14 @@ def process_sentinel1_water_extent_complete(
             filter_size += 1
         
         # Fill null values to prevent issues with filtering
+        # Note: This operation is lazy until we actually access the data
         dataset_filled = dataset.where(~dataset.isnull(), 0)
         
         # Apply filter to each band
         for band in measurements:
+            if band not in dataset:
+                continue
+                
             if verbose:
                 print(f"Filtering band: {band}")
             
