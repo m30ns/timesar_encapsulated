@@ -1,4 +1,4 @@
-#water_extentfinal02.py
+#water_extent_debugged.py
 
 import pystac_client
 import planetary_computer
@@ -14,14 +14,28 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from collections import defaultdict
 import scipy.ndimage as ndimage
-import warnings
-import logging
 
-# Suppress rasterio/GDAL warnings about blob storage
-warnings.filterwarnings('ignore', message='.*GET Request.*')
-warnings.filterwarnings('ignore', message='.*ignoring read failure.*')
-logging.getLogger('rasterio').setLevel(logging.ERROR)
-logging.getLogger('rasterio._io').setLevel(logging.ERROR)
+# Debug mode flag
+DEBUG_MODE = True
+
+def debug_print(message, level="INFO"):
+    """Helper function for debug printing"""
+    if DEBUG_MODE:
+        print(f"[{level}] {message}")
+
+def debug_array_stats(array, name):
+    """Helper function to print array statistics"""
+    if DEBUG_MODE:
+        print(f"\n[DEBUG] Array statistics for {name}:")
+        print(f"  Shape: {array.shape}")
+        print(f"  Dtype: {array.dtype}")
+        print(f"  Min: {np.nanmin(array) if array.size > 0 else 'N/A'}")
+        print(f"  Max: {np.nanmax(array) if array.size > 0 else 'N/A'}")
+        print(f"  Mean: {np.nanmean(array) if array.size > 0 else 'N/A'}")
+        print(f"  NaN count: {np.sum(np.isnan(array))}")
+        print(f"  Inf count: {np.sum(np.isinf(array))}")
+        print(f"  Zero count: {np.sum(array == 0)}")
+        print(f"  Negative count: {np.sum(array < 0)}")
 
 def process_sentinel1_water_extent_complete(
     geometry: shapely.geometry.Polygon,
@@ -83,6 +97,8 @@ def process_sentinel1_water_extent_complete(
         Dict containing processed dataset, water masks, flood results, and statistics
     """
     
+    debug_print("Starting Sentinel-1 water extent processing...")
+    
     # Initialize results dictionary
     results = {
         'dataset': None,
@@ -99,6 +115,8 @@ def process_sentinel1_water_extent_complete(
         if verbose:
             print("Getting STAC catalog and loading Sentinel-1 data...")
         
+        debug_print("Connecting to STAC catalog...")
+        
         # Get the STAC catalog client for Planetary Computer
         client = pystac_client.Client.open(
             "https://planetarycomputer.microsoft.com/api/stac/v1",
@@ -107,6 +125,7 @@ def process_sentinel1_water_extent_complete(
         
         # Format the datetime range for STAC query
         datetime_range = f"{start_date.isoformat()}Z/{end_date.isoformat()}Z"
+        debug_print(f"Date range: {datetime_range}")
         
         # Prepare query parameters
         query_params = {}
@@ -119,9 +138,11 @@ def process_sentinel1_water_extent_complete(
         if orbit_direction:
             query_params["sat:orbit_state"] = {"eq": orbit_direction}
         
+        debug_print(f"Query parameters: {query_params}")
+        
         # Search for Sentinel-1 scenes
         search = client.search(
-            collections=["sentinel-1-rtc"],  # Radiometrically terrain corrected data
+            collections=["sentinel-1-rtc"],
             intersects=geometry,
             datetime=datetime_range,
             query=query_params,
@@ -129,6 +150,8 @@ def process_sentinel1_water_extent_complete(
         
         # Get the search results as a collection of STAC items
         items = search.item_collection()
+        
+        debug_print(f"Found {len(items)} STAC items")
         
         # Check if any items were found
         if len(items) == 0:
@@ -140,7 +163,7 @@ def process_sentinel1_water_extent_complete(
         if verbose:
             print(f"Found {len(items)} Sentinel-1 scenes")
         
-        # Extract and print metadata information about platform and orbit
+        # Extract and print metadata information
         if verbose:
             print("\nMetadata Information:")
             print("---------------------")
@@ -149,6 +172,8 @@ def process_sentinel1_water_extent_complete(
                 orbit_state = item.properties.get("sat:orbit_state", "Unknown")
                 acquisition_date = item.properties.get("datetime", "Unknown")
                 print(f"Scene {i+1}: Platform: {platform_id}, Orbit: {orbit_state}, Date: {acquisition_date}")
+        
+        debug_print("Loading data with odc.stac.load...")
         
         # Load with odc.stac.load
         dataset = odc.stac.load(
@@ -160,14 +185,15 @@ def process_sentinel1_water_extent_complete(
             fail_on_error=False,
         )
         
-        # Store metadata for each time step in the dataset attributes
+        debug_print(f"Dataset loaded with shape: {dataset.sizes}")
+        
+        # Store metadata for each time step
         metadata_list = []
         for item in items:
             metadata = {
                 "platform": item.properties.get("platform", "Unknown"),
                 "orbit_state": item.properties.get("sat:orbit_state", "Unknown"),
                 "datetime": item.properties.get("datetime", "Unknown"),
-                # Add additional metadata fields as needed
                 "orbit_number": item.properties.get("sat:absolute_orbit", "Unknown"),
                 "relative_orbit": item.properties.get("sat:relative_orbit", "Unknown"),
                 "instrument_mode": item.properties.get("sar:instrument_mode", "Unknown"),
@@ -182,7 +208,18 @@ def process_sentinel1_water_extent_complete(
         # Compute the dataset to load it into memory
         if verbose:
             print("Computing dataset...")
+        
+        debug_print("Computing dataset to load into memory...")
         dataset = dataset.compute()
+        
+        debug_print(f"Dataset computed successfully")
+        debug_print(f"Available data variables: {list(dataset.data_vars)}")
+        
+        # Debug: Check for any NaN or infinite values in raw data
+        for band in measurements:
+            if band in dataset:
+                data = dataset[band].values
+                debug_array_stats(data, f"Raw {band} band")
         
         if verbose:
             print(f"Dataset loaded successfully with {len(dataset.time)} time steps")
@@ -194,6 +231,8 @@ def process_sentinel1_water_extent_complete(
         if platform or orbit_direction:
             if verbose:
                 print(f"Filtering dataset by platform={platform}, orbit_direction={orbit_direction}")
+            
+            debug_print(f"Filtering dataset by metadata...")
             
             if hasattr(dataset, 'attrs') and 'metadata' in dataset.attrs:
                 metadata_list = dataset.attrs['metadata']
@@ -211,6 +250,8 @@ def process_sentinel1_water_extent_complete(
                     
                     if keep:
                         keep_indices.append(i)
+                
+                debug_print(f"Keeping {len(keep_indices)} out of {len(metadata_list)} time steps")
                 
                 # Check if any time steps match the criteria
                 if not keep_indices:
@@ -235,10 +276,14 @@ def process_sentinel1_water_extent_complete(
         if verbose:
             print(f"Grouping acquisitions by orbit using criteria: {grouping_criteria}")
         
+        debug_print(f"Grouping acquisitions by orbit...")
+        
         if hasattr(dataset, 'attrs') and 'metadata' in dataset.attrs:
             metadata_list = dataset.attrs['metadata']
             n_times = len(dataset.time)
             n_metadata = len(metadata_list)
+            
+            debug_print(f"Dataset has {n_times} time steps and {n_metadata} metadata entries")
             
             if verbose:
                 print(f"Dataset has {n_times} time steps and {n_metadata} metadata entries")
@@ -278,6 +323,8 @@ def process_sentinel1_water_extent_complete(
                         except Exception:
                             continue
                     
+                    debug_print(f"Strategy {strategy_name} created {len(grouped_indices)} groups")
+                    
                     # Find best group for this strategy
                     for key, indices in grouped_indices.items():
                         if len(indices) >= min_acquisitions and len(indices) > best_count:
@@ -315,6 +362,8 @@ def process_sentinel1_water_extent_complete(
                 key, indices = best_result
                 if verbose:
                     print(f"Selected orbit group '{key}' with {len(indices)} acquisitions using {best_strategy}")
+                
+                debug_print(f"Selected orbit group: {key}")
                 
                 # Ensure all indices are valid
                 valid_indices = [idx for idx in indices if idx < n_times]
@@ -370,21 +419,22 @@ def process_sentinel1_water_extent_complete(
         if verbose:
             print(f"\nApplying {filter_type} filter with size {filter_size} to bands: {measurements}")
         
+        debug_print("Starting speckle filtering...")
+        
         # Ensure filter size is odd
         if filter_size % 2 == 0:
             filter_size += 1
+            debug_print(f"Adjusted filter size to {filter_size} (must be odd)")
         
         # Fill null values to prevent issues with filtering
-        # Note: This operation is lazy until we actually access the data
         dataset_filled = dataset.where(~dataset.isnull(), 0)
         
         # Apply filter to each band
         for band in measurements:
-            if band not in dataset:
-                continue
-                
             if verbose:
                 print(f"Filtering band: {band}")
+            
+            debug_print(f"Processing band: {band}")
             
             try:
                 filtered_band_name = f"block_{filter_type}_filter_{band}"
@@ -398,8 +448,18 @@ def process_sentinel1_water_extent_complete(
                     # Get time slice
                     time_slice = dataset_filled[band].isel(time=i)
                     
+                    debug_print(f"  Time step {i}: original shape {time_slice.shape}", level="DEBUG")
+                    
+                    # Check for problematic values before power conversion
+                    slice_values = time_slice.values
+                    debug_print(f"  Time step {i}: min={np.nanmin(slice_values)}, max={np.nanmax(slice_values)}", level="DEBUG")
+                    
                     # Convert dB to power: power = 10^(dB/10)
-                    power_data = 10**(time_slice.values/10)
+                    # Clip extreme values to prevent overflow
+                    clipped_values = np.clip(slice_values, -100, 100)  # Reasonable dB range
+                    power_data = 10**(clipped_values/10)
+                    
+                    debug_print(f"  Time step {i}: power min={np.nanmin(power_data)}, max={np.nanmax(power_data)}", level="DEBUG")
                     
                     # Apply selected statistical filter
                     if filter_type == 'mean':
@@ -415,6 +475,8 @@ def process_sentinel1_water_extent_complete(
                     
                     # Convert back to dB: dB = 10*log10(power)
                     filtered_db = 10 * np.log10(np.maximum(filtered_power, 1e-10))
+                    
+                    debug_print(f"  Time step {i}: filtered dB min={np.nanmin(filtered_db)}, max={np.nanmax(filtered_db)}", level="DEBUG")
                     
                     # Create DataArray with same coordinates
                     filtered_slice = xr.DataArray(
@@ -436,6 +498,8 @@ def process_sentinel1_water_extent_complete(
                 # Add filtered band to dataset
                 dataset[filtered_band_name] = filtered_stack
                 
+                debug_print(f"Successfully created filtered band: {filtered_band_name}")
+                
                 if verbose:
                     print(f"Successfully created filtered band: {filtered_band_name}")
                 
@@ -444,6 +508,7 @@ def process_sentinel1_water_extent_complete(
                     print(f"Error filtering band {band}: {e}")
                     import traceback
                     traceback.print_exc()
+                debug_print(f"ERROR filtering band {band}: {e}", level="ERROR")
         
         # =================================================================
         # STEP 6: CALCULATE BACKSCATTER AMPLITUDES
@@ -451,12 +516,23 @@ def process_sentinel1_water_extent_complete(
         if verbose:
             print("\nCalculating backscatter amplitudes...")
         
+        debug_print("Calculating backscatter amplitudes...")
+        
         try:
             # Check if filtered bands exist
             if 'block_mean_filter_vv' in dataset and 'block_mean_filter_vh' in dataset:
                 # Apply backscatter scaling optimized for block-filtered data
                 # VV band range is 0dB to -16dB which is DN=1.00 to DN=0.158
                 # VH band range is -5dB to -27dB which is DN=0.562 to DN=0.045
+                
+                debug_print("Converting filtered bands to amplitude...")
+                
+                vv_data = dataset.block_mean_filter_vv.values
+                vh_data = dataset.block_mean_filter_vh.values
+                
+                debug_array_stats(vv_data, "VV filtered data before conversion")
+                debug_array_stats(vh_data, "VH filtered data before conversion")
+                
                 vv_convert = (10**(dataset.block_mean_filter_vv/20)-0.158)*303
                 vh_convert = (10**(dataset.block_mean_filter_vh/20)-0.045)*493
                 
@@ -464,14 +540,18 @@ def process_sentinel1_water_extent_complete(
                 dataset['vh_amp'] = vh_convert
                 dataset['vvvh_amp'] = (vv_convert / vh_convert) * 20
                 
+                debug_print("Amplitude bands created successfully")
+                
                 if verbose:
                     print("Backscatter amplitudes calculated successfully")
             else:
                 if verbose:
                     print("Filtered bands not available for amplitude calculation")
+                debug_print("Filtered bands not available for amplitude calculation", level="WARNING")
         except Exception as e:
             if verbose:
                 print(f"Error calculating backscatter amplitudes: {e}")
+            debug_print(f"ERROR calculating backscatter amplitudes: {e}", level="ERROR")
         
         # =================================================================
         # STEP 7: CREATE BACKSCATTER RGB VISUALIZATION
@@ -481,12 +561,18 @@ def process_sentinel1_water_extent_complete(
                 if verbose:
                     print("\nCreating backscatter RGB visualization...")
                 
+                debug_print("Creating backscatter RGB visualization...")
+                
                 plt.figure(figsize=(12, 12))
                 
                 # Get the three bands for RGB
                 r = np.array(dataset.isel(time=0)['vv_amp'].values, dtype=np.float64)
                 g = np.array(dataset.isel(time=0)['vh_amp'].values, dtype=np.float64)
                 b = np.array(dataset.isel(time=0)['vvvh_amp'].values, dtype=np.float64)
+                
+                debug_array_stats(r, "RGB Red (VV)")
+                debug_array_stats(g, "RGB Green (VH)")
+                debug_array_stats(b, "RGB Blue (VV/VH)")
                 
                 # Replace infinity values with NaN
                 r[~np.isfinite(r)] = np.nan
@@ -503,7 +589,11 @@ def process_sentinel1_water_extent_complete(
                     non_nan = band[~np.isnan(band)]
                     if len(non_nan) > 0:
                         low, high = np.percentile(non_nan, [p_low, p_high])
-                        rgb_data[:,:,i] = np.clip((band - low) / (high - low), 0, 1)
+                        debug_print(f"RGB band {i}: percentiles [{p_low}, {p_high}] = [{low}, {high}]", level="DEBUG")
+                        if high - low > 0:
+                            rgb_data[:,:,i] = np.clip((band - low) / (high - low), 0, 1)
+                        else:
+                            debug_print(f"RGB band {i}: zero range, skipping normalization", level="WARNING")
                 
                 # Replace NaN values with zeros
                 rgb_data = np.nan_to_num(rgb_data)
@@ -539,6 +629,8 @@ def process_sentinel1_water_extent_complete(
             if verbose:
                 print("\nCreating backscatter histogram...")
             
+            debug_print("Creating backscatter histogram...")
+            
             plt.figure(figsize=(15, 5))
             
             try:
@@ -548,20 +640,28 @@ def process_sentinel1_water_extent_complete(
                 
                 if vv_band in dataset:
                     vv_data = dataset.isel(time=0)[vv_band].values
+                    debug_array_stats(vv_data, f"Histogram {vv_band} data")
+                    
                     # Safe log10 transformation
                     vv_clean = np.where((vv_data <= 0) | (~np.isfinite(vv_data)), 1e-10, vv_data)
                     vv_log = np.log10(vv_clean)
                     vv_log = vv_log[np.isfinite(vv_log)]
+                    
+                    debug_print(f"VV log10 data: {len(vv_log)} valid values")
                     
                     if len(vv_log) > 0:
                         plt.hist(vv_log, bins=200, alpha=0.7, label=f"{vv_band} (log10)", color='blue')
                 
                 if vh_band in dataset:
                     vh_data = dataset.isel(time=0)[vh_band].values
+                    debug_array_stats(vh_data, f"Histogram {vh_band} data")
+                    
                     # Safe log10 transformation
                     vh_clean = np.where((vh_data <= 0) | (~np.isfinite(vh_data)), 1e-10, vh_data)
                     vh_log = np.log10(vh_clean)
                     vh_log = vh_log[np.isfinite(vh_log)]
+                    
+                    debug_print(f"VH log10 data: {len(vh_log)} valid values")
                     
                     if len(vh_log) > 0:
                         plt.hist(vh_log, bins=200, alpha=0.7, label=f"{vh_band} (log10)", color='red')
@@ -584,6 +684,7 @@ def process_sentinel1_water_extent_complete(
             except Exception as e:
                 if verbose:
                     print(f"Error creating histogram: {e}")
+                debug_print(f"ERROR creating histogram: {e}", level="ERROR")
         
         # =================================================================
         # STEP 9: WATER EXTENT DETECTION
@@ -591,6 +692,8 @@ def process_sentinel1_water_extent_complete(
         if verbose:
             print(f"\nPerforming water extent detection...")
             print(f"Water threshold: {water_threshold} (log10 space: {use_log10})")
+        
+        debug_print("Starting water extent detection...")
         
         # Determine best band for water detection
         water_band = 'block_mean_filter_vh' if 'block_mean_filter_vh' in dataset else 'vh'
@@ -601,6 +704,8 @@ def process_sentinel1_water_extent_complete(
         if water_band is None:
             raise ValueError("No suitable bands available for water detection")
         
+        debug_print(f"Using {water_band} for water detection")
+        
         if verbose:
             print(f"Using {water_band} for water detection")
         
@@ -609,6 +714,8 @@ def process_sentinel1_water_extent_complete(
         for i in range(len(dataset.time)):
             date_str = np.datetime_as_string(dataset.time.values[i], unit='D')
             
+            debug_print(f"Processing water mask for time {i} ({date_str})", level="DEBUG")
+            
             # Get data for this time step
             data = dataset.isel(time=i)[water_band]
             
@@ -616,15 +723,17 @@ def process_sentinel1_water_extent_complete(
             if use_log10:
                 # Safe log10 transformation
                 data_values = data.values
-                # Replace zero, negative, and infinite values with small positive number
+                debug_array_stats(data_values, f"Water detection input (time {i})")
+                
                 data_values = np.where((data_values <= 0) | (~np.isfinite(data_values)), 1e-10, data_values)
                 data_log = np.log10(data_values)
-                # Handle any remaining infinite or NaN values
                 data_log = np.where(~np.isfinite(data_log), -10, data_log)
+                
+                debug_print(f"  Log10 range: [{np.nanmin(data_log)}, {np.nanmax(data_log)}]", level="DEBUG")
+                
                 water_mask = data_log < water_threshold
             else:
-                data_values = data.values
-                data_values = np.where(~np.isfinite(data_values), 0, data_values)
+                data_values = np.where(~np.isfinite(data.values), 0, data.values)
                 water_mask = data_values < water_threshold
             
             # Store water mask
@@ -637,6 +746,8 @@ def process_sentinel1_water_extent_complete(
             water_areas.append(water_area_sq_km)
             results['statistics'][f'water_area_km2_{i}'] = water_area_sq_km
             
+            debug_print(f"  Water pixels: {water_pixels}, area: {water_area_sq_km:.2f} sq km", level="DEBUG")
+            
             if verbose:
                 print(f"  {date_str}: {water_pixels} water pixels = {water_area_sq_km:.2f} sq km")
         
@@ -646,6 +757,8 @@ def process_sentinel1_water_extent_complete(
         if (show_plots or save_outputs) and len(dataset.time) > 0:
             if verbose:
                 print("\nCreating water extent visualization...")
+            
+            debug_print("Creating water extent visualization...")
             
             # Use first time step for visualization
             first_date = np.datetime_as_string(dataset.time.values[0], unit='D')
@@ -659,11 +772,17 @@ def process_sentinel1_water_extent_complete(
             vh_data = np.array(scene['vh'].values, dtype=np.float64)
             vh_data[~np.isfinite(vh_data)] = np.nan
             
+            debug_array_stats(vh_data, "VH background data")
+            
             # Apply contrast stretching
             non_nan = vh_data[~np.isnan(vh_data)]
             if len(non_nan) > 0:
                 low, high = np.percentile(non_nan, [2, 98])
-                vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
+                debug_print(f"VH contrast stretch: [{low}, {high}]", level="DEBUG")
+                if high - low > 0:
+                    vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
+                else:
+                    debug_print("VH data has zero range, skipping contrast stretch", level="WARNING")
             
             vh_data = np.nan_to_num(vh_data)
             
@@ -686,6 +805,8 @@ def process_sentinel1_water_extent_complete(
                 water_overlay[:,:,2] = 1.0  # Blue channel
                 water_overlay[:,:,3] = water_mask_viz * 0.7  # Alpha transparency
                 plt.imshow(water_overlay)
+            else:
+                debug_print(f"WARNING: Water mask shape {water_mask_viz.shape} doesn't match RGB shape {rgb_data.shape[:2]}", level="WARNING")
             
             # Add title with metadata
             title = 'VH-Band Threshold Water Extent'
@@ -714,6 +835,8 @@ def process_sentinel1_water_extent_complete(
             if verbose:
                 print(f"\nCreating persistent water mask (threshold: {persistence_threshold})...")
             
+            debug_print("Creating persistent water mask...")
+            
             # Stack all water masks
             all_masks = []
             for i in range(len(dataset.time)):
@@ -724,6 +847,8 @@ def process_sentinel1_water_extent_complete(
             # Calculate water frequency across time
             water_stack = np.stack(all_masks, axis=0)
             water_frequency = np.mean(water_stack, axis=0)
+            
+            debug_print(f"Water frequency range: [{np.min(water_frequency)}, {np.max(water_frequency)}]", level="DEBUG")
             
             # Create persistent water mask
             persistent_water = water_frequency > persistence_threshold
@@ -756,7 +881,8 @@ def process_sentinel1_water_extent_complete(
                 non_nan = vh_data[~np.isnan(vh_data)]
                 if len(non_nan) > 0:
                     low, high = np.percentile(non_nan, [2, 98])
-                    vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
+                    if high - low > 0:
+                        vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
                 
                 vh_data = np.nan_to_num(vh_data)
                 
@@ -800,6 +926,8 @@ def process_sentinel1_water_extent_complete(
         if len(dataset.time) > 1 and (show_plots or save_outputs):
             if verbose:
                 print("\nCreating water extent time series...")
+            
+            debug_print("Creating water extent time series...")
             
             # Get the dates for the x-axis
             dates = [np.datetime64(dt) for dt in dataset.time.values]
@@ -850,11 +978,15 @@ def process_sentinel1_water_extent_complete(
             if verbose:
                 print("\nPerforming flood detection analysis...")
             
+            debug_print("Starting flood detection analysis...")
+            
             # Determine acquisition indices for flood detection
             if first_acq_ind is None:
                 first_acq_ind = 0
             if second_acq_ind is None:
                 second_acq_ind = len(dataset.time) - 1
+            
+            debug_print(f"Flood detection indices: first={first_acq_ind}, second={second_acq_ind}")
             
             # Validate indices
             if first_acq_ind < 0 or first_acq_ind >= len(dataset.time):
@@ -894,16 +1026,18 @@ def process_sentinel1_water_extent_complete(
                     first_values = first_data.values
                     second_values = second_data.values
                     
+                    debug_array_stats(first_values, "First acquisition data")
+                    debug_array_stats(second_values, "Second acquisition data")
+                    
                     # Handle negative values and zeros
-                    first_values = np.where((first_values <= 0) | (~np.isfinite(first_values)), 1e-10, first_values)
-                    second_values = np.where((second_values <= 0) | (~np.isfinite(second_values)), 1e-10, second_values)
+                    first_values = np.where(first_values <= 0, 1e-10, first_values)
+                    second_values = np.where(second_values <= 0, 1e-10, second_values)
                     
                     first_log = np.log10(first_values)
                     second_log = np.log10(second_values)
                     
-                    # Handle any remaining infinite or NaN values
-                    first_log = np.where(~np.isfinite(first_log), -10, first_log)
-                    second_log = np.where(~np.isfinite(second_log), -10, second_log)
+                    debug_print(f"First log range: [{np.nanmin(first_log)}, {np.nanmax(first_log)}]", level="DEBUG")
+                    debug_print(f"Second log range: [{np.nanmin(second_log)}, {np.nanmax(second_log)}]", level="DEBUG")
                     
                     # Calculate the difference in log space
                     change_values = second_log - first_log
@@ -921,8 +1055,13 @@ def process_sentinel1_water_extent_complete(
                 # Handle NaN values
                 change_values = np.nan_to_num(change_values, nan=0)
                 
+                debug_array_stats(change_values, "Change values")
+                
                 # Find pixels with significant backscatter decrease (potential flooding)
                 flooding_mask = change_values < change_threshold
+                
+                debug_print(f"Flooding pixels: {np.sum(flooding_mask)}")
+                debug_print(f"Baseline water pixels: {np.sum(baseline_water_mask)}")
                 
                 # Store flood detection results
                 results['flood_results'] = {
@@ -978,7 +1117,8 @@ def process_sentinel1_water_extent_complete(
                     non_nan = vh_filled[np.isfinite(vh_filled)]
                     if len(non_nan) > 0:
                         low, high = np.percentile(non_nan, [2, 98])
-                        vh_filled = np.clip((vh_filled - low) / (high - low), 0, 1)
+                        if high - low > 0:
+                            vh_filled = np.clip((vh_filled - low) / (high - low), 0, 1)
                     
                     # Apply minimum intensity
                     min_inten = 0.6
@@ -1029,6 +1169,8 @@ def process_sentinel1_water_extent_complete(
             if verbose:
                 print("\nCreating faceted plots...")
             
+            debug_print("Creating faceted plots...")
+            
             # Create faceted plot for VH band
             max_cols = 3
             n_times = len(dataset.time)
@@ -1056,7 +1198,8 @@ def process_sentinel1_water_extent_complete(
                         non_nan = vh_data[~np.isnan(vh_data)]
                         if len(non_nan) > 0:
                             low, high = np.percentile(non_nan, [2, 98])
-                            vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
+                            if high - low > 0:
+                                vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
                         
                         vh_data = np.nan_to_num(vh_data)
                         
@@ -1101,15 +1244,14 @@ def process_sentinel1_water_extent_complete(
             if verbose:
                 print("\nCreating threshold distribution visualization...")
             
+            debug_print("Creating threshold distribution visualization...")
+            
             data = dataset.isel(time=0)[water_band].values
             
             # Apply log10 transformation if requested
             if use_log10:
-                # Handle negative values and zeros
-                data = np.where((data <= 0) | (~np.isfinite(data)), 1e-10, data)
+                data = np.where(data <= 0, 1e-10, data)
                 data = np.log10(data)
-                # Handle any remaining infinite or NaN values
-                data = np.where(~np.isfinite(data), -10, data)
                 xlabel = f"{water_band} values (log10 transformed)"
                 title_suffix = " (log10 transformed)"
             else:
@@ -1118,6 +1260,8 @@ def process_sentinel1_water_extent_complete(
             
             # Remove infinite and NaN values
             data = data[np.isfinite(data)]
+            
+            debug_print(f"Threshold distribution data: {len(data)} valid values")
             
             plt.figure(figsize=(10, 6))
             plt.hist(data.flatten(), bins=200, color='gray', alpha=0.8, label=f"{water_band} values")
@@ -1150,7 +1294,8 @@ def process_sentinel1_water_extent_complete(
             print("\n" + "="*60)
             print("PROCESSING COMPLETED SUCCESSFULLY!")
             print("="*60)
-            print(f"Dataset dimensions: {dict(dataset.dims)}")
+            # Use dataset.sizes instead of dict(dataset.dims) to avoid FutureWarning
+            print(f"Dataset dimensions: {dict(dataset.sizes)}")
             print(f"Available bands: {list(dataset.data_vars)}")
             print(f"Time range: {np.datetime_as_string(dataset.time.values[0], unit='D')} to {np.datetime_as_string(dataset.time.values[-1], unit='D')}")
             print(f"Water masks created: {len(results['water_masks'])}")
@@ -1172,6 +1317,7 @@ def process_sentinel1_water_extent_complete(
             print(f"ERROR during processing: {e}")
             import traceback
             traceback.print_exc()
+        debug_print(f"FATAL ERROR: {e}", level="ERROR")
         return results
 
 
