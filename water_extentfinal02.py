@@ -18,12 +18,6 @@ import scipy.ndimage as ndimage
 # Debug mode flag
 DEBUG_MODE = True
 
-# Note about overflow warnings:
-# SAR data can sometimes contain extreme values that cause overflow when converting
-# from dB to power (10^(dB/10)). This is handled gracefully by setting overflow
-# values to the maximum float64 value. These pixels likely represent invalid data
-# or extreme reflections and should be investigated if they occur frequently.
-
 def debug_print(message, level="INFO"):
     """Helper function for debug printing"""
     if DEBUG_MODE:
@@ -456,24 +450,16 @@ def process_sentinel1_water_extent_complete(
                     
                     debug_print(f"  Time step {i}: original shape {time_slice.shape}", level="DEBUG")
                     
-                    # Check for problematic values before power conversion
-                    slice_values = time_slice.values
-                    debug_print(f"  Time step {i}: min={np.nanmin(slice_values)}, max={np.nanmax(slice_values)}", level="DEBUG")
+                    # Get time slice
+                    time_slice = dataset_filled[band].isel(time=i)
+                    
+                    debug_print(f"  Time step {i}: original shape {time_slice.shape}", level="DEBUG")
                     
                     # Convert dB to power: power = 10^(dB/10)
-                    # Handle overflow without clipping input data
-                    with np.errstate(over='ignore'):  # Suppress overflow warning temporarily
-                        power_data = 10**(slice_values/10)
+                    # Note: This matches the original code exactly - no special handling
+                    power_data = 10**(time_slice.values/10)
                     
-                    # Check for overflow and handle gracefully
-                    overflow_mask = ~np.isfinite(power_data)
-                    if np.any(overflow_mask):
-                        overflow_count = np.sum(overflow_mask)
-                        debug_print(f"  Time step {i}: {overflow_count} pixels had overflow in power conversion", level="WARNING")
-                        # Replace infinite values with large but finite value
-                        power_data[overflow_mask] = np.finfo(np.float64).max
-                    
-                    debug_print(f"  Time step {i}: power min={np.nanmin(power_data)}, max={np.nanmax(power_data)}", level="DEBUG")
+                    debug_print(f"  Time step {i}: power conversion complete", level="DEBUG")
                     
                     # Apply selected statistical filter
                     if filter_type == 'mean':
@@ -538,32 +524,22 @@ def process_sentinel1_water_extent_complete(
                 # Apply backscatter scaling optimized for block-filtered data
                 # VV band range is 0dB to -16dB which is DN=1.00 to DN=0.158
                 # VH band range is -5dB to -27dB which is DN=0.562 to DN=0.045
-                
-                debug_print("Converting filtered bands to amplitude...")
-                
-                vv_data = dataset.block_mean_filter_vv.values
-                vh_data = dataset.block_mean_filter_vh.values
-                
-                debug_array_stats(vv_data, "VV filtered data before conversion")
-                debug_array_stats(vh_data, "VH filtered data before conversion")
-                
-                # Handle potential overflow in power conversion
-                with np.errstate(over='ignore', invalid='ignore'):
-                    vv_convert = (10**(dataset.block_mean_filter_vv/20)-0.158)*303
-                    vh_convert = (10**(dataset.block_mean_filter_vh/20)-0.045)*493
-                
-                # Check for any infinite or NaN values
-                vv_inf_count = np.sum(~np.isfinite(vv_convert.values))
-                vh_inf_count = np.sum(~np.isfinite(vh_convert.values))
-                if vv_inf_count > 0 or vh_inf_count > 0:
-                    debug_print(f"Infinity/NaN values after conversion: VV={vv_inf_count}, VH={vh_inf_count}", level="WARNING")
+                vv_convert = (10**(dataset.block_mean_filter_vv/20)-0.158)*303
+                vh_convert = (10**(dataset.block_mean_filter_vh/20)-0.045)*493
                 
                 dataset['vv_amp'] = vv_convert
                 dataset['vh_amp'] = vh_convert
+                dataset['vvvh_amp'] = (vv_convert / vh_convert) * 20
                 
-                # Handle division by zero in VV/VH ratio
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    dataset['vvvh_amp'] = (vv_convert / vh_convert) * 20
+                # Apply backscatter scaling optimized for block-filtered data
+                # VV band range is 0dB to -16dB which is DN=1.00 to DN=0.158
+                # VH band range is -5dB to -27dB which is DN=0.562 to DN=0.045
+                vv_convert = (10**(dataset.block_mean_filter_vv/20)-0.158)*303
+                vh_convert = (10**(dataset.block_mean_filter_vh/20)-0.045)*493
+                
+                dataset['vv_amp'] = vv_convert
+                dataset['vh_amp'] = vh_convert
+                dataset['vvvh_amp'] = (vv_convert / vh_convert) * 20
                 
                 debug_print("Amplitude bands created successfully")
                 
@@ -615,10 +591,7 @@ def process_sentinel1_water_extent_complete(
                     if len(non_nan) > 0:
                         low, high = np.percentile(non_nan, [p_low, p_high])
                         debug_print(f"RGB band {i}: percentiles [{p_low}, {p_high}] = [{low}, {high}]", level="DEBUG")
-                        if high - low > 0:
-                            rgb_data[:,:,i] = np.clip((band - low) / (high - low), 0, 1)
-                        else:
-                            debug_print(f"RGB band {i}: zero range, skipping normalization", level="WARNING")
+                        rgb_data[:,:,i] = np.clip((band - low) / (high - low), 0, 1)
                 
                 # Replace NaN values with zeros
                 rgb_data = np.nan_to_num(rgb_data)
@@ -669,8 +642,7 @@ def process_sentinel1_water_extent_complete(
                     
                     # Safe log10 transformation
                     vv_clean = np.where((vv_data <= 0) | (~np.isfinite(vv_data)), 1e-10, vv_data)
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        vv_log = np.log10(vv_clean)
+                    vv_log = np.log10(vv_clean)
                     vv_log = vv_log[np.isfinite(vv_log)]
                     
                     debug_print(f"VV log10 data: {len(vv_log)} valid values")
@@ -684,8 +656,7 @@ def process_sentinel1_water_extent_complete(
                     
                     # Safe log10 transformation
                     vh_clean = np.where((vh_data <= 0) | (~np.isfinite(vh_data)), 1e-10, vh_data)
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        vh_log = np.log10(vh_clean)
+                    vh_log = np.log10(vh_clean)
                     vh_log = vh_log[np.isfinite(vh_log)]
                     
                     debug_print(f"VH log10 data: {len(vh_log)} valid values")
@@ -806,10 +777,7 @@ def process_sentinel1_water_extent_complete(
             if len(non_nan) > 0:
                 low, high = np.percentile(non_nan, [2, 98])
                 debug_print(f"VH contrast stretch: [{low}, {high}]", level="DEBUG")
-                if high - low > 0:
-                    vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
-                else:
-                    debug_print("VH data has zero range, skipping contrast stretch", level="WARNING")
+                vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
             
             vh_data = np.nan_to_num(vh_data)
             
@@ -908,8 +876,7 @@ def process_sentinel1_water_extent_complete(
                 non_nan = vh_data[~np.isnan(vh_data)]
                 if len(non_nan) > 0:
                     low, high = np.percentile(non_nan, [2, 98])
-                    if high - low > 0:
-                        vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
+                    vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
                 
                 vh_data = np.nan_to_num(vh_data)
                 
@@ -1060,9 +1027,8 @@ def process_sentinel1_water_extent_complete(
                     first_values = np.where(first_values <= 0, 1e-10, first_values)
                     second_values = np.where(second_values <= 0, 1e-10, second_values)
                     
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        first_log = np.log10(first_values)
-                        second_log = np.log10(second_values)
+                    first_log = np.log10(first_values)
+                    second_log = np.log10(second_values)
                     
                     debug_print(f"First log range: [{np.nanmin(first_log)}, {np.nanmax(first_log)}]", level="DEBUG")
                     debug_print(f"Second log range: [{np.nanmin(second_log)}, {np.nanmax(second_log)}]", level="DEBUG")
@@ -1145,8 +1111,7 @@ def process_sentinel1_water_extent_complete(
                     non_nan = vh_filled[np.isfinite(vh_filled)]
                     if len(non_nan) > 0:
                         low, high = np.percentile(non_nan, [2, 98])
-                        if high - low > 0:
-                            vh_filled = np.clip((vh_filled - low) / (high - low), 0, 1)
+                        vh_filled = np.clip((vh_filled - low) / (high - low), 0, 1)
                     
                     # Apply minimum intensity
                     min_inten = 0.6
@@ -1226,8 +1191,7 @@ def process_sentinel1_water_extent_complete(
                         non_nan = vh_data[~np.isnan(vh_data)]
                         if len(non_nan) > 0:
                             low, high = np.percentile(non_nan, [2, 98])
-                            if high - low > 0:
-                                vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
+                            vh_data = np.clip((vh_data - low) / (high - low), 0, 1)
                         
                         vh_data = np.nan_to_num(vh_data)
                         
@@ -1279,8 +1243,7 @@ def process_sentinel1_water_extent_complete(
             # Apply log10 transformation if requested
             if use_log10:
                 data = np.where(data <= 0, 1e-10, data)
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    data = np.log10(data)
+                data = np.log10(data)
                 xlabel = f"{water_band} values (log10 transformed)"
                 title_suffix = " (log10 transformed)"
             else:
